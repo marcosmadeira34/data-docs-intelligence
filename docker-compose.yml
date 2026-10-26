@@ -1,0 +1,82 @@
+name: ddi
+
+x-backend-env: &backend-env
+  DDI_ENVIRONMENT: ${DDI_ENVIRONMENT:-development}
+  DDI_DATABASE_URL: postgresql+psycopg://ddi:${POSTGRES_PASSWORD:-ddi}@db:5432/ddi
+  DDI_SECRET_KEY: ${DDI_SECRET_KEY:-dev-insecure-change-me-0123456789abcdef}
+  DDI_STORAGE_BACKEND: ${DDI_STORAGE_BACKEND:-local}
+  DDI_STORAGE_LOCAL_ROOT: /data/storage
+  DDI_COOKIE_SECURE: ${DDI_COOKIE_SECURE:-false}
+  DDI_ALLOW_SIGNUP: ${DDI_ALLOW_SIGNUP:-true}
+  DDI_AI_PROVIDER: ${DDI_AI_PROVIDER:-none}
+  DDI_ANTHROPIC_API_KEY: ${DDI_ANTHROPIC_API_KEY:-}
+  DDI_LOG_LEVEL: ${DDI_LOG_LEVEL:-INFO}
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ddi
+      POSTGRES_USER: ddi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ddi}
+    ports:
+      - "127.0.0.1:${DDI_DB_PORT:-5442}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ddi -d ddi"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: ./backend
+    environment: *backend-env
+    command: ["sh", "-c", "alembic upgrade head && python -m app.cli bootstrap"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: ./backend
+    environment: *backend-env
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    ports:
+      - "127.0.0.1:${DDI_API_PORT:-8010}:8000"
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/ready').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build: ./backend
+    environment: *backend-env
+    command: ["python", "-m", "app.worker"]
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+    environment:
+      API_INTERNAL_URL: http://api:8000
+    ports:
+      - "127.0.0.1:${DDI_WEB_PORT:-3010}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  storage:
